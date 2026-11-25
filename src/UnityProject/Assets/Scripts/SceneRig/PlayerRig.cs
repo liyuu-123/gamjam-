@@ -9,5 +9,7 @@ namespace WrongTurn
         public GameObject Shadow;
         public GameObject Body;
         public GameObject Weapon;
+        public GameObject SoulBody;
+        public GameObject SoulGlow;
     }
 }
