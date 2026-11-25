@@ -17,6 +17,13 @@ namespace WrongTurn.EditorTools
         [MenuItem("Wrong Turn/Rebuild Main Scene")]
         public static void InitializeProject()
         {
+            if (SceneRigExists() && !ConfirmRigWipe())
+            {
+                Debug.LogWarning("Rebuild aborted — the editable scene rig is intact. " +
+                                 "Use Wrong Turn/Migration if you intend to regenerate it.");
+                return;
+            }
+
             Directory.CreateDirectory("Assets/Scenes");
             Directory.CreateDirectory("Build/Windows");
 
@@ -52,6 +59,25 @@ namespace WrongTurn.EditorTools
             Debug.Log("Wrong Turn project initialized: " + ScenePath);
         }
 
+        private static bool SceneRigExists()
+        {
+            if (!File.Exists(ScenePath))
+                return false;
+            var existing = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+            return existing.GetRootGameObjects()
+                .Any(root => root.GetComponent<WrongTurn.MapVariant>() != null);
+        }
+
+        private static bool ConfirmRigWipe()
+        {
+            if (Application.isBatchMode)
+                return false;
+            return EditorUtility.DisplayDialog("Rebuild Main Scene",
+                "Main.unity 已包含可编辑的场景对象（MapVariant/PlayerRig 等）。\n\n" +
+                "重建会把它们全部冲掉，恢复为最早的空场景。确定继续吗？",
+                "仍然重建", "取消");
+        }
+
         private static void ConfigureResourceImports()
         {
             foreach (var path in Directory.GetFiles("Assets/Resources/Art", "*.png"))
@@ -60,7 +86,10 @@ namespace WrongTurn.EditorTools
                 var importer = AssetImporter.GetAtPath(normalized) as TextureImporter;
                 if (importer == null)
                     continue;
-                importer.textureType = TextureImporterType.Default;
+                importer.textureType = TextureImporterType.Sprite;
+                importer.spriteImportMode = SpriteImportMode.Single;
+                importer.spritePixelsPerUnit = 480f;
+                importer.spritePivot = new Vector2(0.5f, 0f);
                 importer.filterMode = FilterMode.Point;
                 importer.textureCompression = TextureImporterCompression.Uncompressed;
                 importer.mipmapEnabled = false;

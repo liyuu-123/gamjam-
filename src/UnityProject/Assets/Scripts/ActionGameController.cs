@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Tilemaps;
 
 namespace WrongTurn
 {
@@ -18,13 +19,6 @@ namespace WrongTurn
             Dead,
             Won,
             Lost
-        }
-
-        private enum EnemyKindAction
-        {
-            Melee,
-            Ranged,
-            Boss
         }
 
         private enum EnemyStateAction
@@ -247,6 +241,14 @@ namespace WrongTurn
         private ScoutOrb scout;
         private MemoryNodeAction openMemory;
 
+        // Editable scene rig (see Editor/RigBuilder.cs). When the scene carries
+        // MapVariant roots, maps/spawns/props come from the scene instead of code.
+        private readonly List<MapVariant> mapVariants = new List<MapVariant>();
+        private MapVariant activeVariant;
+        private PlayerRig playerRig;
+        private MusicRig musicRig;
+        private bool sceneRig;
+
         private Vector2 playerPos = StartPosition;
         private Vector2 playerVelocity;
         private Vector2 aimDirection = Vector2.right;
@@ -313,6 +315,10 @@ namespace WrongTurn
             QualitySettings.vSyncCount = 1;
             LoadExternalArt();
             SetupCamera();
+            AdoptSceneRig();
+            activeVariant = VariantFor(selectedMap);
+            if (sceneRig && activeVariant != null)
+                ActivateVariant(activeVariant);
             BuildMap();
             BuildWorld();
             CreatePlayer();
@@ -430,8 +436,16 @@ namespace WrongTurn
 
         private void SetupMusic()
         {
-            musicA = gameObject.AddComponent<AudioSource>();
-            musicB = gameObject.AddComponent<AudioSource>();
+            if (musicRig != null && musicRig.TrackA != null && musicRig.TrackB != null)
+            {
+                musicA = musicRig.TrackA;
+                musicB = musicRig.TrackB;
+            }
+            else
+            {
+                musicA = gameObject.AddComponent<AudioSource>();
+                musicB = gameObject.AddComponent<AudioSource>();
+            }
             foreach (var source in new[] { musicA, musicB })
             {
                 source.playOnAwake = false;
@@ -515,33 +529,138 @@ namespace WrongTurn
             source.volume = 0f;
         }
 
-        private void BuildMap()
+        private void AdoptSceneRig()
+        {
+            mapVariants.Clear();
+            mapVariants.AddRange(FindObjectsByType<MapVariant>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None));
+            mapVariants.Sort((a, b) => a.MapId.CompareTo(b.MapId));
+            sceneRig = mapVariants.Count > 0;
+            playerRig = sceneRig
+                ? FindFirstObjectByType<PlayerRig>(FindObjectsInactive.Include)
+                : null;
+            musicRig = sceneRig
+                ? FindFirstObjectByType<MusicRig>(FindObjectsInactive.Include)
+                : null;
+            if (sceneRig)
+                Debug.Log("Scene rig adopted: " + mapVariants.Count + " map variants, player rig " +
+                          (playerRig != null ? "found" : "missing") + ", music rig " +
+                          (musicRig != null ? "found" : "missing") + ".");
+        }
+
+        private MapVariant VariantFor(int mapIndex)
+        {
+            return mapVariants.Find(v => v.MapId == mapIndex) ??
+                   (mapVariants.Count > 0 ? mapVariants[0] : null);
+        }
+
+        private void ActivateVariant(MapVariant variant)
+        {
+            foreach (var candidate in mapVariants)
+                candidate.gameObject.SetActive(candidate == variant);
+            if (variant.Layout != null)
+            {
+                var layoutRenderer = variant.Layout.GetComponent<TilemapRenderer>();
+                if (layoutRenderer != null)
+                    layoutRenderer.enabled = false;
+            }
+        }
+
+        private void ReadLayoutFromVariant(MapVariant variant)
         {
             for (int x = 0; x < MapWidth; x++)
             for (int y = 0; y < MapHeight; y++)
                 tiles[x, y] = TileKind.FixedWall;
 
-            if (currentMap == 1)
-                BuildIceMap();
-            else if (currentMap == 2)
-                BuildDesertMap();
-            else
-                BuildForestMap();
+            foreach (var position in variant.Layout.cellBounds.allPositionsWithin)
+            {
+                if (position.x < 0 || position.x >= MapWidth ||
+                    position.y < 0 || position.y >= MapHeight)
+                    continue;
+                var tile = variant.Layout.GetTile(position);
+                if (tile == null)
+                    continue;
+                if (variant.MovableWallTile != null && tile == variant.MovableWallTile)
+                    tiles[position.x, position.y] = TileKind.MovableWall;
+                else if (variant.GapTile != null && tile == variant.GapTile)
+                    tiles[position.x, position.y] = TileKind.Gap;
+                else if (variant.WallTile != null && tile == variant.WallTile)
+                    tiles[position.x, position.y] = TileKind.FixedWall;
+                else
+                    tiles[position.x, position.y] = TileKind.Floor;
+            }
         }
 
-        private void BuildForestMap()
+        private void RebuildInteractiveFromVariant()
         {
-            Carve(2, 14, 7, 5);  // training room
-            Carve(5, 9, 2, 5);   // teaching corridor
-            Carve(1, 9, 5, 4);   // first memory room
-            Carve(7, 8, 8, 6);   // main combat hall
-            Carve(14, 10, 4, 2); // connecting corridor
-            Carve(17, 8, 9, 6);  // dark hall
-            Carve(18, 6, 8, 2);  // wall shortcut
-            Carve(18, 2, 8, 5);  // boss arena
-            Carve(2, 3, 7, 5);   // lower memory branch
-            Carve(4, 7, 2, 2);   // lower connector
-            Carve(8, 7, 2, 2);   // central lower connector
+            crystals.Clear();
+            foreach (var spawn in activeVariant.GetComponentsInChildren<CrystalSpawn>(true))
+                crystals.Add(new MemoryNodeAction
+                {
+                    Position = spawn.transform.position,
+                    Title = spawn.Title,
+                    View = spawn.gameObject
+                });
+            lights.Clear();
+            foreach (var spawn in activeVariant.GetComponentsInChildren<LightSpawn>(true))
+                lights.Add(new LightNodeAction
+                {
+                    Position = spawn.transform.position,
+                    View = spawn.gameObject
+                });
+        }
+
+        public const int EditorMapWidth = MapWidth;
+        public const int EditorMapHeight = MapHeight;
+
+        public static TileKind[,] BuildTilesForEditor(int mapIndex)
+        {
+            var grid = new TileKind[MapWidth, MapHeight];
+            for (int x = 0; x < MapWidth; x++)
+            for (int y = 0; y < MapHeight; y++)
+                grid[x, y] = TileKind.FixedWall;
+            if (mapIndex == 1)
+                BuildIceMap(grid);
+            else if (mapIndex == 2)
+                BuildDesertMap(grid);
+            else
+                BuildForestMap(grid);
+            return grid;
+        }
+
+        private void BuildMap()
+        {
+            if (sceneRig && activeVariant != null && activeVariant.Layout != null)
+            {
+                ReadLayoutFromVariant(activeVariant);
+                return;
+            }
+
+            for (int x = 0; x < MapWidth; x++)
+            for (int y = 0; y < MapHeight; y++)
+                tiles[x, y] = TileKind.FixedWall;
+
+            if (currentMap == 1)
+                BuildIceMap(tiles);
+            else if (currentMap == 2)
+                BuildDesertMap(tiles);
+            else
+                BuildForestMap(tiles);
+        }
+
+        private static void BuildForestMap(TileKind[,] tiles)
+        {
+            Carve(tiles, 2, 14, 7, 5);  // training room
+            Carve(tiles, 5, 9, 2, 5);   // teaching corridor
+            Carve(tiles, 1, 9, 5, 4);   // first memory room
+            Carve(tiles, 7, 8, 8, 6);   // main combat hall
+            Carve(tiles, 14, 10, 4, 2); // connecting corridor
+            Carve(tiles, 17, 8, 9, 6);  // dark hall
+            Carve(tiles, 18, 6, 8, 2);  // wall shortcut
+            Carve(tiles, 18, 2, 8, 5);  // boss arena
+            Carve(tiles, 2, 3, 7, 5);   // lower memory branch
+            Carve(tiles, 4, 7, 2, 2);   // lower connector
+            Carve(tiles, 8, 7, 2, 2);   // central lower connector
 
             // The two shortcuts are optional: the long route remains always available.
             tiles[21, 7] = TileKind.MovableWall;
@@ -557,20 +676,20 @@ namespace WrongTurn
             tiles[5, 5] = TileKind.FixedWall;
         }
 
-        private void BuildIceMap()
+        private static void BuildIceMap(TileKind[,] tiles)
         {
-            Carve(2, 14, 7, 5);
-            Carve(5, 10, 2, 5);
-            Carve(1, 8, 5, 3);
-            Carve(7, 8, 7, 6);
-            Carve(13, 10, 5, 2);
-            Carve(17, 8, 9, 6);
-            Carve(9, 4, 6, 4);
-            Carve(4, 4, 4, 4);
-            Carve(18, 5, 8, 3);
-            Carve(17, 1, 9, 5);
-            Carve(4, 7, 2, 2);
-            Carve(10, 7, 2, 2);
+            Carve(tiles, 2, 14, 7, 5);
+            Carve(tiles, 5, 10, 2, 5);
+            Carve(tiles, 1, 8, 5, 3);
+            Carve(tiles, 7, 8, 7, 6);
+            Carve(tiles, 13, 10, 5, 2);
+            Carve(tiles, 17, 8, 9, 6);
+            Carve(tiles, 9, 4, 6, 4);
+            Carve(tiles, 4, 4, 4, 4);
+            Carve(tiles, 18, 5, 8, 3);
+            Carve(tiles, 17, 1, 9, 5);
+            Carve(tiles, 4, 7, 2, 2);
+            Carve(tiles, 10, 7, 2, 2);
 
             tiles[16, 9] = TileKind.MovableWall;
             tiles[16, 10] = TileKind.Gap;
@@ -583,19 +702,19 @@ namespace WrongTurn
             tiles[23, 3] = TileKind.FixedWall;
         }
 
-        private void BuildDesertMap()
+        private static void BuildDesertMap(TileKind[,] tiles)
         {
-            Carve(2, 14, 7, 5);
-            Carve(4, 10, 4, 4);
-            Carve(8, 8, 7, 6);
-            Carve(14, 10, 5, 3);
-            Carve(18, 7, 7, 7);
-            Carve(9, 4, 6, 4);
-            Carve(2, 4, 7, 4);
-            Carve(4, 7, 2, 2);
-            Carve(18, 5, 7, 2);
-            Carve(17, 1, 9, 5);
-            Carve(14, 8, 4, 2);
+            Carve(tiles, 2, 14, 7, 5);
+            Carve(tiles, 4, 10, 4, 4);
+            Carve(tiles, 8, 8, 7, 6);
+            Carve(tiles, 14, 10, 5, 3);
+            Carve(tiles, 18, 7, 7, 7);
+            Carve(tiles, 9, 4, 6, 4);
+            Carve(tiles, 2, 4, 7, 4);
+            Carve(tiles, 4, 7, 2, 2);
+            Carve(tiles, 18, 5, 7, 2);
+            Carve(tiles, 17, 1, 9, 5);
+            Carve(tiles, 14, 8, 4, 2);
 
             tiles[10, 11] = TileKind.MovableWall;
             tiles[11, 11] = TileKind.Gap;
@@ -609,7 +728,7 @@ namespace WrongTurn
             tiles[23, 3] = TileKind.FixedWall;
         }
 
-        private void Carve(int x, int y, int width, int height)
+        private static void Carve(TileKind[,] tiles, int x, int y, int width, int height)
         {
             for (int ix = x; ix < x + width; ix++)
             for (int iy = y; iy < y + height; iy++)
@@ -696,15 +815,28 @@ namespace WrongTurn
 
         private void CreatePlayer()
         {
-            playerGlow = NewSprite("PlayerGlow", PixelArtHD.Glow, 4300, world);
-            playerGlow.transform.localScale = Vector3.one * 2.8f;
-            playerGlow.GetComponent<SpriteRenderer>().color = new Color(1f, 0.68f, 0.25f, 0.24f);
-            playerShadow = NewSprite("PlayerShadow", PixelArtHD.Shadow, 5000, world);
-            playerShadow.transform.localScale = new Vector3(0.95f, 0.72f, 1f);
-            playerShadow.GetComponent<SpriteRenderer>().color = new Color(0f, 0f, 0f, 0.65f);
-            playerView = NewSprite("Player", heroDown, 6000, world);
-            weaponView = NewSprite("HeldRing", PixelArtHD.Ring, 6010, playerView.transform);
-            weaponView.transform.localScale = Vector3.one * 0.46f;
+            if (playerRig != null && playerRig.Glow != null && playerRig.Shadow != null &&
+                playerRig.Body != null && playerRig.Weapon != null)
+            {
+                playerGlow = playerRig.Glow;
+                playerShadow = playerRig.Shadow;
+                playerView = playerRig.Body;
+                weaponView = playerRig.Weapon;
+                if (playerView.GetComponent<SpriteRenderer>() == null)
+                    playerView.AddComponent<SpriteRenderer>();
+            }
+            else
+            {
+                playerGlow = NewSprite("PlayerGlow", PixelArtHD.Glow, 4300, world);
+                playerGlow.transform.localScale = Vector3.one * 2.8f;
+                playerGlow.GetComponent<SpriteRenderer>().color = new Color(1f, 0.68f, 0.25f, 0.24f);
+                playerShadow = NewSprite("PlayerShadow", PixelArtHD.Shadow, 5000, world);
+                playerShadow.transform.localScale = new Vector3(0.95f, 0.72f, 1f);
+                playerShadow.GetComponent<SpriteRenderer>().color = new Color(0f, 0f, 0f, 0.65f);
+                playerView = NewSprite("Player", heroDown, 6000, world);
+                weaponView = NewSprite("HeldRing", PixelArtHD.Ring, 6010, playerView.transform);
+                weaponView.transform.localScale = Vector3.one * 0.46f;
+            }
             reticleView = NewSprite("AimReticle", PixelArtHD.Spark, 7000, world);
             reticleView.transform.localScale = Vector3.one * 0.6f;
             damageFlash = NewSprite("DamageFlash", PixelArtHD.White, 9000, world);
@@ -731,49 +863,56 @@ namespace WrongTurn
         private void CreateInteractiveObjects()
         {
             crystals.Clear();
-            crystals.Add(new MemoryNodeAction
-            {
-                Position = new Vector2(2.5f, 10.5f),
-                Title = "裂纹里的初见"
-            });
-            crystals.Add(new MemoryNodeAction
-            {
-                Position = new Vector2(25.3f, 7.3f),
-                Title = "墙缝里的旧名字"
-            });
-            foreach (var crystal in crystals)
-            {
-                var glow = NewSprite("CrystalGlow", PixelArtHD.Glow, 520, world);
-                glow.transform.localScale = Vector3.one * 2.2f;
-                glow.GetComponent<SpriteRenderer>().color = new Color(0.25f, 0.9f, 1f, 0.26f);
-                var view = NewSprite("Crystal", PixelArtHD.Crystal, 535, world);
-                var root = new GameObject("MemoryCrystal");
-                root.transform.SetParent(world);
-                view.transform.SetParent(root.transform);
-                glow.transform.SetParent(root.transform);
-                view.transform.localPosition = Vector3.zero;
-                glow.transform.localPosition = new Vector3(0f, 0.2f, 0f);
-                crystal.View = root;
-            }
-
             lights.Clear();
-            lights.Add(new LightNodeAction { Position = new Vector2(3.2f, 15.2f) });
-            lights.Add(new LightNodeAction { Position = new Vector2(4.3f, 10.6f) });
-            lights.Add(new LightNodeAction { Position = new Vector2(12.5f, 10.6f) });
-            lights.Add(new LightNodeAction { Position = new Vector2(19.5f, 11.5f) });
-            lights.Add(new LightNodeAction { Position = new Vector2(19.5f, 4.5f) });
-            foreach (var light in lights)
+            if (sceneRig && activeVariant != null)
             {
-                var glow = NewSprite("LightGlow", PixelArtHD.Glow, 510, world);
-                glow.transform.localScale = Vector3.one * 2.1f;
-                glow.GetComponent<SpriteRenderer>().color = new Color(1f, 0.57f, 0.17f, 0.22f);
-                var view = NewSprite("Light", PixelArtHD.Light, 525, world);
-                var root = new GameObject("LightPickup");
-                root.transform.SetParent(world);
-                view.transform.SetParent(root.transform);
-                glow.transform.SetParent(root.transform);
-                glow.transform.localPosition = new Vector3(0f, 0.15f, 0f);
-                light.View = root;
+                RebuildInteractiveFromVariant();
+            }
+            else
+            {
+                crystals.Add(new MemoryNodeAction
+                {
+                    Position = new Vector2(2.5f, 10.5f),
+                    Title = "裂纹里的初见"
+                });
+                crystals.Add(new MemoryNodeAction
+                {
+                    Position = new Vector2(25.3f, 7.3f),
+                    Title = "墙缝里的旧名字"
+                });
+                foreach (var crystal in crystals)
+                {
+                    var glow = NewSprite("CrystalGlow", PixelArtHD.Glow, 520, world);
+                    glow.transform.localScale = Vector3.one * 2.2f;
+                    glow.GetComponent<SpriteRenderer>().color = new Color(0.25f, 0.9f, 1f, 0.26f);
+                    var view = NewSprite("Crystal", PixelArtHD.Crystal, 535, world);
+                    var root = new GameObject("MemoryCrystal");
+                    root.transform.SetParent(world);
+                    view.transform.SetParent(root.transform);
+                    glow.transform.SetParent(root.transform);
+                    view.transform.localPosition = Vector3.zero;
+                    glow.transform.localPosition = new Vector3(0f, 0.2f, 0f);
+                    crystal.View = root;
+                }
+
+                lights.Add(new LightNodeAction { Position = new Vector2(3.2f, 15.2f) });
+                lights.Add(new LightNodeAction { Position = new Vector2(4.3f, 10.6f) });
+                lights.Add(new LightNodeAction { Position = new Vector2(12.5f, 10.6f) });
+                lights.Add(new LightNodeAction { Position = new Vector2(19.5f, 11.5f) });
+                lights.Add(new LightNodeAction { Position = new Vector2(19.5f, 4.5f) });
+                foreach (var light in lights)
+                {
+                    var glow = NewSprite("LightGlow", PixelArtHD.Glow, 510, world);
+                    glow.transform.localScale = Vector3.one * 2.1f;
+                    glow.GetComponent<SpriteRenderer>().color = new Color(1f, 0.57f, 0.17f, 0.22f);
+                    var view = NewSprite("Light", PixelArtHD.Light, 525, world);
+                    var root = new GameObject("LightPickup");
+                    root.transform.SetParent(world);
+                    view.transform.SetParent(root.transform);
+                    glow.transform.SetParent(root.transform);
+                    glow.transform.localPosition = new Vector3(0f, 0.15f, 0f);
+                    light.View = root;
+                }
             }
 
             tutorialTarget = new TutorialTarget { Position = new Vector2(7.2f, 15.65f) };
@@ -802,6 +941,15 @@ namespace WrongTurn
                     Destroy(enemy.View);
             }
             enemies.Clear();
+            if (sceneRig && activeVariant != null)
+            {
+                foreach (var marker in activeVariant.GetComponentsInChildren<EnemySpawn>(true))
+                {
+                    AddEnemy(marker.Kind, marker.transform.position, Mathf.Max(1, marker.Hp));
+                    marker.gameObject.SetActive(false);
+                }
+                return;
+            }
             if (currentMap == 1)
             {
                 AddEnemy(EnemyKindAction.Melee, new Vector2(10.5f, 12.2f), 5);
@@ -855,11 +1003,13 @@ namespace WrongTurn
                 Hp = hp,
                 MaxHp = hp,
                 Cooldown = 0.5f,
-                BaseTint = currentMap == 1
-                    ? new Color(0.78f, 0.96f, 1f)
-                    : currentMap == 2
-                        ? new Color(1f, 0.83f, 0.63f)
-                        : new Color(0.82f, 1f, 0.88f)
+                BaseTint = sceneRig && activeVariant != null
+                    ? activeVariant.EnemyTint
+                    : currentMap == 1
+                        ? new Color(0.78f, 0.96f, 1f)
+                        : currentMap == 2
+                            ? new Color(1f, 0.83f, 0.63f)
+                            : new Color(0.82f, 1f, 0.88f)
             };
             var sprite = kind == EnemyKindAction.Melee ? PixelArtHD.Melee :
                 kind == EnemyKindAction.Ranged ? PixelArtHD.Ranged : PixelArtHD.Boss;
@@ -940,6 +1090,18 @@ namespace WrongTurn
         private void ApplyStageData()
         {
             currentMap = Mathf.Clamp(currentMap, 0, 2);
+            if (sceneRig)
+            {
+                activeVariant = VariantFor(currentMap);
+                if (activeVariant != null)
+                {
+                    ActivateVariant(activeVariant);
+                    if (cam != null)
+                        cam.backgroundColor = activeVariant.Background;
+                    RebuildInteractiveFromVariant();
+                }
+                return;
+            }
             cam.backgroundColor = StageBackgrounds[currentMap];
             for (int i = 0; i < crystals.Count && i < StageCrystals[currentMap].Length; i++)
             {
